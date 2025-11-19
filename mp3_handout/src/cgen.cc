@@ -485,6 +485,30 @@ void StrTable::code_string_table(std::ostream &s, CgenClassTable *ct) {
 void StringEntry::code_def(std::ostream &s, CgenClassTable *ct) {
 #ifdef MP3
   // TODO: add code here
+  std::string str = this.get_string();
+  int len = str.size();
+
+  Constant *strAddr = ct->builder.CreateGlobalStringPtr(str,"str_const_" + std::to_string(this.index));
+
+  CgenNode *stringNode = ct->find(String);
+
+  StructType     *stringTy   = stringNode->get_obj_type();      // %String
+  GlobalVariable *stringVtbl = stringNode->get_vtable_global(); // @_String_vtable_prototype
+
+  std::vector<Constant *> objFields;
+  objFields.reserve(2);
+  objFields.push_back(stringVtbl); 
+  objFields.push_back(strAddr);
+
+  Constant *objInit = ConstantStruct::get(stringTy, objFields);
+
+  auto *objGV = new GlobalVariable(
+      ct->the_module,
+      stringTy,
+      true,
+      GlobalValue::PrivateLinkage,
+      objInit,
+      "str_const_obj_" + std::to_string(this->index));
 #endif
 }
 
@@ -509,8 +533,68 @@ void CgenNode::setup(int tag, int depth) {
 #ifdef MP3
   layout_features();
 
+
   // TODO: add code here
 
+
+  // vtable
+  std::vector<Type*> vt_methods_ty(methods.size());
+
+  for (int i = 0;i < methods.size();i++) {
+    vt_methods_ty[i] = methods[i].func->getType();
+  }
+  StructType *vt_ty = StructType::getTypeByName(ctx, vt_name);
+  if (!vt_ty) {
+    vt_ty = StructType::create(ctx, vt_name);
+  }
+  vt_ty->setBody(vtable_methods_type);
+  vtable_type = vt_ty;
+
+
+  // class type
+  std::vector<Type *> obj_fields;
+  obj_fields.reserve(1 + attrs.size());
+
+  Type *vt_ptr_ty = vtable_type->getPointerTo();
+  obj_fields.push_back(vt_ptr_ty);
+
+  for (int i = 0;i < attrs.size();i++) {
+    Type *fld_ty = llvm_type_from_cool_type(attrs[i].attr_type, class_table, this);
+    obj_fields.push_back(fld_ty);
+  }
+
+  std::string obj_name = get_type_name();
+  StructType *obj_ty = StructType::getTypeByName(ctx, obj_name);
+  if (!obj_ty) {
+    obj_ty = StructType::create(ctx, obj_name);
+  }
+  obj_ty->setBody(obj_fields);
+  obj_type = obj_ty;
+
+
+  // global variable
+  std::vector<Constant *> vt_vals;
+  vt_vals.reserve(methods.size());
+  for (const auto &mi : methods) {
+    vt_vals.push_back(mi.func);
+  }
+
+  Constant *vt_init;
+  if (!vt_vals.empty()) {
+    vt_init = ConstantStruct::get(vtable_type, vt_vals);
+  } else {
+    // impossible to happen
+    // just for debug
+    vt_init = Constant::getNullValue(vtable_type);
+  }
+
+  vtable_global = new GlobalVariable(
+      class_table->the_module,
+      vtable_type,
+      /*isConstant=*/true,
+      GlobalValue::InternalLinkage,
+      vt_init,
+      get_vtable_name());
 #endif
 }
 
@@ -519,21 +603,51 @@ void CgenNode::setup(int tag, int depth) {
 // and assigning each attribute a slot in the class structure.
 void CgenNode::layout_features() {
   // TODO: add code here
-  if (this.parentnd) {
-    this.method_index = parentnd->method_index;
-    this.attr_index = parentnd->attr_index;
-    this.methods = parentnd->methods;
-    this.attrs = parentnd->attrs;
+  if (parentnd) {
+    method_index = parentnd->method_index;
+    attr_index = parentnd->attr_index;
+    methods = parentnd->methods;
+    attrs = parentnd->attrs;
   }
 
   for (int i = features.first(); features.more(i + 1); i = features.next(i)) {
 
     if (auto m = dynamic_cast<method_class*>(features->nth(i))) {
-      Symbol name = m.get_name();
-      Symbol cool_ret_type = m.get_return_type();
+      Symbol name = m->get_name();
+      Symbol cool_ret_type = m->get_return_type();
       std::vector<Type*> llvm_args;
-      Type* llvm_ret_type = llvm_type_from_cool_type(cool_ret_type, this.class_table);
-      this.class_table->create_llvm_function(name->get_string(), llvm_type, );      
+
+      Symbol self_type = this->get_name();  
+      Type* self_llvm_type = llvm_type_from_cool_type(self_type, class_table, this);
+      llvm_args.push_back(self_llvm_type);
+      
+      int j = m->get_formals()->first();
+      while (m->get_formals()->more(j)) {
+        Type* llvm_arg_type = llvm_type_from_cool_type(m->get_formals()->nth(j), class_table, this);
+        llvm_args.push_back(llvm_arg_type);
+        j = m->get_formals()->next(j);
+      }
+      Type* llvm_ret_type = llvm_type_from_cool_type(cool_ret_type, class_table, this);
+      Function* func = class_table->create_llvm_function(name->get_string(), llvm_ret_type, llvm_args, false);  
+
+      auto it = method_index.find(name);
+      if (it == method_index.end()) {
+        int idx = methods.size();
+        method_index[name] = idx;
+        methods.push_back(new Method_Info(name, func, m));
+      } else {
+        // override: keep slot, just update func
+        methods[it->second] = new Method_Info(name, func, m);
+      }
+    }
+    if (auto a = dynamic_cast<attr_class*>(features->nth(i))) {
+        Symbol name = a->get_name();
+        Symbol type_decl = a->get_type_decl();
+        Type* attr_llvm_type = llvm_type_from_cool_type(type_decl, class_table, this);
+
+        int index = attrs.size();
+        attr_index.push(name, index);
+        attrs.push_back(new Attr_Info(name, type_decl, attr_llvm_type));
     }
   }
 }
@@ -824,7 +938,7 @@ Value *sub_class::code(CgenEnvironment *env) {
     std::cerr << "sub" << std::endl;
 
   // TODO: add code here and replace `return nullptr`
-    Value * lhs = e1->code(env);
+  Value * lhs = e1->code(env);
   Value * rhs = e2->code(env);
   if (!lhs || !rhs) {
     return nullptr;
@@ -954,7 +1068,7 @@ Value *leq_class::code(CgenEnvironment *env) {
   if (!lhs || !rhs) {
     return nullptr;
   }
-  if (lhs->getType() != rhs->getType()) {
+  if (lhs->getType() != rhs->getType() || (!lhs->getType()->isIntegerTy(32) && !lhs->getType()->isIntegerTy(1))) {
     return nullptr;
   }
   return env->builder.CreateICmpSLE(lhs, rhs);
@@ -1025,7 +1139,56 @@ Value *static_dispatch_class::code(CgenEnvironment *env) {
   assert(0 && "Unsupported case for phase 1");
 #else
   // TODO: add code here and replace `return nullptr`
-  return nullptr;
+  Value* exprV = expr->code(env);
+
+  Function *F = env->builder.GetInsertBlock()->getParent();
+
+  // error handling for null expr
+  BasicBlock *okBB   = BasicBlock::Create(env->context, "static_dispatch.ok", F);
+  BasicBlock *errBB = BasicBlock::Create(env->context, "static_dispatch.err", F);
+  Value *isNull = env->builder.CreateICmpEQ(exprV, Constant::getNullValue(exprV->getType()),"isnull");
+
+  builder.CreateCondBr(isNull, errBB, okBB);
+
+  builder.SetInsertPoint(errBB);
+  BasicBlock *abortBB = env->get_or_insert_abort_block(F);
+
+  // continue in ok block
+  builder.SetInsertPoint(okBB);
+
+  Symbol target_type = this->type_name;
+  Symbol mname       = this->name;
+
+  CgenNode *target_cls = env->type_to_class(target_type);
+  Function *Func = target_cls->get_method_function(mname); 
+
+  std::vector<Value*> args;
+
+  Type *expected_self_ty =
+      target_cls->get_obj_type()->getPointerTo(); 
+  exprV = conform(exprV, expected_self_ty, env);
+  args.push_back(exprV);
+
+
+  Expressions actuals = get_actual();
+
+  method_class *m_cls = target_cls->get_method_class_by_name(mname);
+
+  Formals formals = m_cls->get_formals();
+  int i = actuals->first();
+  while (actuals->more(i)) {
+    Value * actual_i = actuals->nth(i)->code(env);
+    Symbol type_i = formals->nth(i)->get_type_decl();
+    Type *llvm_type_i = llvm_type_from_cool_type(type_i, &env->class_table, env->cur_class);
+
+    actual_i = conform(actual_i, llvm_type_i, env);
+    args.push_back(actual_i);
+    i = actuals->next(i);
+  }
+
+  Value *callRes = env->builder.CreateCall(Func, args, "static_call");
+
+  return callRes;
 #endif
 }
 
@@ -1047,7 +1210,53 @@ Value *dispatch_class::code(CgenEnvironment *env) {
   assert(0 && "Unsupported case for phase 1");
 #else
   // TODO: add code here and replace `return nullptr`
-  return nullptr;
+  Value* exprV = expr->code(env);
+
+  Function *F = env->builder.GetInsertBlock()->getParent();
+
+  // error handling for null expr
+  BasicBlock *okBB   = BasicBlock::Create(env->context, "dynamic_dispatch.ok", F);
+  BasicBlock *errBB = BasicBlock::Create(env->context, "dynamic_dispatch.err", F);
+  Value *isNull = env->builder.CreateICmpEQ(exprV, Constant::getNullValue(exprV->getType()),"isnull");
+
+  builder.CreateCondBr(isNull, errBB, okBB);
+
+  builder.SetInsertPoint(errBB);
+  BasicBlock *abortBB = env->get_or_insert_abort_block(F);
+
+  // continue in ok block
+  builder.SetInsertPoint(okBB);
+
+  Symbol target_type = expr->get_type();
+  Symbol mname       = this->name;
+
+  CgenNode *target_cls = env->type_to_class(target_type);
+  Function *Func = target_cls->get_method_function(mname); 
+
+  std::vector<Value*> args;
+
+  args.push_back(exprV);
+
+
+  Expressions actuals = get_actual();
+
+  method_class *m_cls = target_cls->get_method_class_by_name(mname);
+
+  Formals formals = m_cls->get_formals();
+  int i = actuals->first();
+  while (actuals->more(i)) {
+    Value * actual_i = actuals->nth(i)->code(env);
+    Symbol type_i = formals->nth(i)->get_type_decl();
+    Type *llvm_type_i = llvm_type_from_cool_type(type_i, &env->class_table, env->cur_class);
+
+    actual_i = conform(actual_i, llvm_type_i, env);
+    args.push_back(actual_i);
+    i = actuals->next(i);
+  }
+
+  Value *callRes = env->builder.CreateCall(Func, args, "dynamic_call");
+
+  return callRes;
 #endif
 }
 
@@ -1125,4 +1334,70 @@ Value *attr_class::code(CgenEnvironment *env) {
   // TODO: add code here and replace `return nullptr`
   return nullptr;
 #endif
+}
+
+llvm::Value *conform(llvm::Value *src, llvm::Type *dest_type,
+                     CgenEnvironment *env)
+{
+
+  if (!src) return nullptr;
+
+  Type *currT = src->getType();
+  if (currT == dest_type) {
+    return src;
+  }
+
+  if (currT->isPointerTy() && dest_type->isPointerTy()) {
+    return env->builder.CreateBitCast(src, dest_type, "obj_conform");
+  }
+
+  if (currT->isIntegerTy() && dest_type->isIntegerTy()) {
+    unsigned srcw = currT->getIntegerBitWidth();
+    unsigned destw = dest_type->getIntegerBitWidth();
+
+    if (srcw == destw) {
+      return src;
+    } else if (gw < ew) {
+      // Zero-extend smaller to larger (e.g., Bool i1 -> i32)
+      return env->builder.CreateZExt(src, dest_type, "zext_conform");
+    } else {
+      return env->builder.CreateTrunc(src, dest_type, "trunc_conform");
+    }
+  }
+  return val;
+}
+
+
+llvm::Type* llvm_type_from_cool_type(Symbol t, CgenClassTable* class_table, CgenNode* classNode) {
+  llvm::LLVMContext &ctx = class_table->context;
+  if (t == Int) {
+    return Type::getInt32Ty(ctx);  // i32
+  }
+  if (t == Bool) {
+    return Type::getInt1Ty(ctx);   // i1
+  }
+
+  // String is always an object
+  if (t == String) {
+    StructType *st = StructType::getTypeByName(ctx, "String");
+    if (!st) st = StructType::create(ctx, "String");
+    return PointerType::getUnqual(st);
+  }
+
+  // SELF_TYPE and No_type are usually handled elsewhere; if you hit them here:
+  if (t == SELF_TYPE) {
+    // Often treated as Object* in generic contexts
+    StructType *st = StructType::getTypeByName(ctx, classNode->get_name()->get_string());
+    if (!st) st = StructType::create(ctx, classNode->get_name()->get_string());
+    return PointerType::getUnqual(st);
+  }
+
+  if (t == No_type) {
+    return Type::getVoidTy(ctx);  // or assert(false)
+  }
+
+  std::string name = t->get_string(); 
+  StructType *st = StructType::getTypeByName(ctx, name);
+  if (!st) st = StructType::create(ctx, name);
+  return PointerType::getUnqual(st); 
 }

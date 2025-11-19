@@ -46,7 +46,8 @@ typedef Cases_class *Cases;
   virtual void dump_with_types(std::ostream &, int) = 0;                       \
   virtual void cgen(const std::optional<std::string> &) = 0;
 
-#define Class__EXTRAS virtual void dump_with_types(std::ostream &, int) = 0;
+#define Class__EXTRAS virtual void dump_with_types(std::ostream &, int) = 0;   \
+  Features get_features() {return features}
 
 #define Feature_EXTRAS                                                         \
   virtual void dump_with_types(std::ostream &, int) = 0;                       \
@@ -84,9 +85,12 @@ typedef Cases_class *Cases;
 
 #define method_EXTRAS                                                          \
   virtual Symbol get_return_type() { return return_type; }                     \
+  virtual Symbol get_formals() { return formals; }                             \
   llvm::Function *code(CgenEnvironment *) override;
 
-#define attr_EXTRAS llvm::Value *code(CgenEnvironment *) override;
+#define attr_EXTRAS                                                            \
+  virtual Symbol get_type_decl() { return type_decl; }                     \
+  llvm::Value *code(CgenEnvironment *) override;
 
 #define Formal_EXTRAS                                                          \
   virtual Symbol get_type_decl() = 0; /* ## */                                 \
@@ -119,4 +123,8 @@ typedef Cases_class *Cases;
 #define no_expr_EXTRAS        /* ## */                                         \
   int no_code() { return 1; } /* ## */
 
+
+
+#define static_dispatch_EXTRAS                                                 \
+  Expressions get_actual() {return actual}
 #endif /* COOL_TREE_HANDCODE_H */

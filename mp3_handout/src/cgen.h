@@ -23,13 +23,15 @@
 class CgenNode;
 struct Method_Info {
   Symbol method_name;
-  CgenNode* method_class;
-  llvm::function* func;
-  Symbol ret_type;
+  llvm::Function* func;
+  method_class* m_cls;
+  Method_Info(Symbol mn, llvm::Function* func, method_class* mc) : method_name(mn), func(func), m_cls(mc) {}
 };
 struct Attr_Info {
   Symbol attr_name;
   Symbol attr_type;
+  llvm::Type* attr_llvm_type;
+  Attr_Info(Symbol an, Symbol at, llvm::Type* alt) : attr_name(an), attr_type(at), attr_llvm_type(alt) {}
 };
 
 
@@ -147,6 +149,33 @@ public:
 #endif
   void codeGenMainmain();
 
+  llvm::StructType* get_obj_type() {
+    return obj_type;
+  }
+
+  llvm::StructType* get_vtable_type() {
+    return vtable_type;
+  }
+  llvm::GlobalVariable* get_vtable_global() {
+    return vtable_global;
+  }
+
+  llvm::Function* get_method_function(Symbol m) {
+    auto it = method_index.find(m);
+    if (it == method_index.end())
+      return nullptr;
+    return methods[it->second].func;
+  }
+
+  method_class* get_method_class_by_name(Symbol m) {
+
+    auto it = method_index.find(m);
+    if (it == method_index.end())
+      return nullptr;
+
+    return methods[it->second].m_cls;
+  }
+
 private:
   CgenNode *parentnd;               // Parent of class
   std::vector<CgenNode *> children; // Children of class
@@ -162,6 +191,10 @@ private:
   std::vector<Method_Info> methods;
   std::vector<Attr_Info> attrs;
 
+
+  llvm::StructType *obj_type = nullptr; // %Class 
+  llvm::StructType *vtable_type = nullptr; // %_Class_vtable 
+  llvm::GlobalVariable *vtable_global = nullptr; //
 };
 
 // CgenEnvironment provides the environment for code generation of a method.
@@ -258,5 +291,5 @@ public:
 llvm::Value *conform(llvm::Value *src, llvm::Type *dest_type,
                      CgenEnvironment *env);
 
-llvm::Type* llvm_type_from_cool_type(Symbol t, CgenClassTable* class_table);
+llvm::Type* llvm_type_from_cool_type(Symbol t, CgenClassTable* class_table, CgenNode* class);
 #endif
